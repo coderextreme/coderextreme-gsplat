@@ -1,0 +1,5 @@
+{
+  "name": "Lumina Splat Viewer",
+  "description": "A high-performance WebGL 2.0 viewer for Gaussian Splat PLY data. Features robust binary parsing, point cloud approximation rendering, and a modern dark-mode interface.",
+  "requestFramePermissions": []
+}
