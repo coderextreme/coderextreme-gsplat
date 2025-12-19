@@ -9,9 +9,13 @@ export class SplatRenderer {
   private animationId: number | null = null;
 
   // Camera State
-  private camPos = { x: 0, y: 0, z: 5 };
-  private camRot = { x: 0, y: 0 };
+  private target = { x: 0, y: 0, z: 0 };
+  private radius = 5;
+  private camRot = { x: 0, y: 0 }; // x: Pitch, y: Yaw
+  
+  // Interaction State
   private isDragging = false;
+  private dragButton = -1; // 0: Left (Rotate), 2: Right (Pan)
   private lastMouse = { x: 0, y: 0 };
 
   constructor(canvas: HTMLCanvasElement) {
@@ -67,6 +71,7 @@ export class SplatRenderer {
 
       uniform mat4 u_projection;
       uniform mat4 u_view;
+      uniform float u_viewport_height;
 
       out vec3 v_color;
       out float v_opacity;
@@ -76,11 +81,14 @@ export class SplatRenderer {
         gl_Position = u_projection * pos;
         
         // Approximate size based on scale magnitude and distance
+        // Using log-scale (stored in exp form in buffer)
         float avgScale = (a_scale.x + a_scale.y + a_scale.z) / 3.0;
-        float dist = length(pos.xyz);
         
-        // Simple perspective sizing for points
-        gl_PointSize = max(2.0, (avgScale * 300.0) / dist); 
+        // Perspective correct point size:
+        // size = world_size * viewport_height / (depth * 2 * tan(fov/2))
+        // FOV is 45 deg. tan(22.5) ~ 0.414. 2 * 0.414 = 0.828
+        // We use a factor slightly larger to make splats fuller
+        gl_PointSize = max(2.0, (avgScale * u_viewport_height * 1.5) / gl_Position.w);
         
         v_color = a_color;
         v_opacity = a_opacity;
@@ -99,6 +107,7 @@ export class SplatRenderer {
         float distSq = dot(coord, coord);
         if (distSq > 0.25) discard;
         
+        // Soft gaussian-like falloff
         float alpha = exp(-distSq * 8.0) * v_opacity;
         outColor = vec4(v_color, alpha);
       }
@@ -127,8 +136,7 @@ export class SplatRenderer {
     // FR-WEBGL-240: Blending and Depth
     this.gl.enable(this.gl.DEPTH_TEST);
     this.gl.enable(this.gl.BLEND);
-    this.gl.blendFunc(this.gl.ONE, this.gl.ONE_MINUS_SRC_ALPHA); // Premultiplied alpha blend typically used in splatting, or ONE_MINUS_SRC_ALPHA for standard
-    // Requirement says: ONE source factor, ONE_MINUS_SRC_ALPHA destination factor
+    // Standard alpha blending
     this.gl.blendFunc(this.gl.ONE, this.gl.ONE_MINUS_SRC_ALPHA); 
     this.gl.disable(this.gl.CULL_FACE);
 
@@ -136,27 +144,117 @@ export class SplatRenderer {
   }
 
   private initInputHandlers() {
-    // Simple Orbit Controls approximation
     this.canvas.addEventListener('mousedown', (e) => {
       this.isDragging = true;
+      this.dragButton = e.button;
       this.lastMouse = { x: e.clientX, y: e.clientY };
     });
+    
     window.addEventListener('mouseup', () => {
       this.isDragging = false;
+      this.dragButton = -1;
     });
+
     window.addEventListener('mousemove', (e) => {
       if (!this.isDragging) return;
       const dx = e.clientX - this.lastMouse.x;
       const dy = e.clientY - this.lastMouse.y;
       this.lastMouse = { x: e.clientX, y: e.clientY };
 
-      this.camRot.x -= dy * 0.005;
-      this.camRot.y -= dx * 0.005;
+      if (this.dragButton === 0) {
+        // Rotate
+        this.camRot.x -= dy * 0.005;
+        this.camRot.y -= dx * 0.005;
+        // Clamp Pitch
+        this.camRot.x = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, this.camRot.x));
+      } else if (this.dragButton === 2) {
+        // Pan
+        // Calculate basis vectors for the camera
+        const cy = Math.cos(this.camRot.y);
+        const sy = Math.sin(this.camRot.y);
+        const cp = Math.cos(this.camRot.x);
+        const sp = Math.sin(this.camRot.x);
+
+        // Forward vector (from target to camera)
+        // Note: Camera is at Target + SphericalOffset
+        // Normalized direction vectors:
+        const fwd = [cy * cp, sp, sy * cp]; // Not strictly fwd, this is position unit vector.
+        
+        // We need Camera Right and Camera Up
+        // Standard LookAt formulation:
+        // eye = [radius * cy * cp, radius * sp, radius * sy * cp] (if y is up? No, usually y is up in world)
+        
+        // Re-deriving proper basis from ViewMatrix logic:
+        // Eye position relative to target:
+        // X = radius * sin(yaw) * cos(pitch)
+        // Y = radius * sin(pitch)
+        // Z = radius * cos(yaw) * cos(pitch)
+        // But our getViewMatrix uses:
+        // cx = cy * cp * z
+        // cy_pos = sp * z
+        // cz = sy * cp * z
+        
+        // Right vector is cross(Y-axis, Fwd). 
+        // Simple approximation for panning:
+        // Move target along the screen plane.
+        const panSpeed = this.radius * 0.0015;
+        
+        // Right Vector (approx based on yaw)
+        const rx = Math.cos(this.camRot.y);
+        const rz = -Math.sin(this.camRot.y);
+        
+        // Up Vector (approx based on pitch and yaw)
+        // But actually, we can just grab them from the View Matrix if we wanted, 
+        // but calculating locally is faster/easier.
+        
+        // Let's use the view matrix rows (since it's orthonormal)
+        // ViewMatrix = [ R, U, F, T ]
+        // We want to move Target in -R * dx + U * dy direction (screen space mapping)
+        
+        // Let's compute the basis vectors used in getViewMatrix to be consistent
+        const z = this.radius;
+        const cx = cy * cp * z;
+        const cy_pos = sp * z;
+        const cz = sy * cp * z;
+        const eye = [cx, cy_pos, cz];
+        const up = [0, 1, 0];
+        const fwdVec = [-eye[0], -eye[1], -eye[2]]; // looking at 0,0,0 relative
+        const len = Math.sqrt(fwdVec[0]**2 + fwdVec[1]**2 + fwdVec[2]**2);
+        const f = [fwdVec[0]/len, fwdVec[1]/len, fwdVec[2]/len];
+        
+        // Right
+        const r = [
+            up[1]*f[2] - up[2]*f[1],
+            up[2]*f[0] - up[0]*f[2],
+            up[0]*f[1] - up[1]*f[0]
+        ];
+        const rLen = Math.sqrt(r[0]**2 + r[1]**2 + r[2]**2);
+        const right = [r[0]/rLen, r[1]/rLen, r[2]/rLen];
+        
+        // Real Up
+        const u = [
+            f[1]*right[2] - f[2]*right[1],
+            f[2]*right[0] - f[0]*right[2],
+            f[0]*right[1] - f[1]*right[0]
+        ];
+        
+        this.target.x -= (right[0] * dx - u[0] * dy) * panSpeed;
+        this.target.y -= (right[1] * dx - u[1] * dy) * panSpeed;
+        this.target.z -= (right[2] * dx - u[2] * dy) * panSpeed;
+      }
     });
+
     this.canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
-      this.camPos.z += e.deltaY * 0.01;
-      this.camPos.z = Math.max(0.1, this.camPos.z);
+      const zoomScale = 0.1;
+      this.radius += e.deltaY * 0.01 * (this.radius * zoomScale);
+      this.radius = Math.max(0.1, this.radius);
+    });
+    
+    // Disable context menu for right-click panning
+    this.canvas.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      return false;
     });
   }
 
@@ -177,7 +275,7 @@ export class SplatRenderer {
     const fieldOfView = 45 * Math.PI / 180;
     const aspect = this.canvas.clientWidth / this.canvas.clientHeight;
     const zNear = 0.1;
-    const zFar = 100.0;
+    const zFar = 1000.0;
     
     const f = 1.0 / Math.tan(fieldOfView / 2);
     const rangeInv = 1 / (zNear - zFar);
@@ -191,50 +289,37 @@ export class SplatRenderer {
   }
 
   private getViewMatrix(): Float32Array {
-    // Basic orbit rotation
-    const cosX = Math.cos(this.camRot.x);
-    const sinX = Math.sin(this.camRot.x);
-    const cosY = Math.cos(this.camRot.y);
-    const sinY = Math.sin(this.camRot.y);
-
-    // Distance translation
-    const z = this.camPos.z;
-
-    // Rotation Matrix * Translation
-    // Simplified logic: translate back Z, then rotate
-    // Actually, usually View = (Camera World)^-1
-    // We orbit around 0,0,0
-    
-    // Position of camera
+    // Basic orbit rotation logic
     const cy = Math.cos(this.camRot.y);
     const sy = Math.sin(this.camRot.y);
     const cp = Math.cos(this.camRot.x);
     const sp = Math.sin(this.camRot.x);
 
+    // Camera position relative to target
+    const z = this.radius;
     const cx = cy * cp * z;
     const cy_pos = sp * z;
     const cz = sy * cp * z;
 
-    // LookAt matrix targeting 0,0,0 from camera pos
-    // Using a simple lookAt implementation
-    const eye = [cx, cy_pos, cz];
-    const center = [0, 0, 0];
+    const eye = [this.target.x + cx, this.target.y + cy_pos, this.target.z + cz];
+    const center = [this.target.x, this.target.y, this.target.z];
     const up = [0, 1, 0];
 
+    // LookAt Matrix Construction
     const z0 = eye[0] - center[0];
     const z1 = eye[1] - center[1];
     const z2 = eye[2] - center[2];
     let len = Math.sqrt(z0*z0 + z1*z1 + z2*z2);
+    if (len === 0) len = 1;
     const fwd = [z0/len, z1/len, z2/len];
 
-    // right = up x fwd
     const x0 = up[1]*fwd[2] - up[2]*fwd[1];
     const x1 = up[2]*fwd[0] - up[0]*fwd[2];
     const x2 = up[0]*fwd[1] - up[1]*fwd[0];
     len = Math.sqrt(x0*x0 + x1*x1 + x2*x2);
+    if (len === 0) len = 1;
     const right = [x0/len, x1/len, x2/len];
 
-    // newUp = fwd x right
     const y0 = fwd[1]*right[2] - fwd[2]*right[1];
     const y1 = fwd[2]*right[0] - fwd[0]*right[2];
     const y2 = fwd[0]*right[1] - fwd[1]*right[0];
@@ -264,12 +349,13 @@ export class SplatRenderer {
         
         const uProj = this.gl.getUniformLocation(this.program, 'u_projection');
         const uView = this.gl.getUniformLocation(this.program, 'u_view');
+        const uViewportHeight = this.gl.getUniformLocation(this.program, 'u_viewport_height');
 
         this.gl.uniformMatrix4fv(uProj, false, this.getProjectionMatrix());
         this.gl.uniformMatrix4fv(uView, false, this.getViewMatrix());
+        this.gl.uniform1f(uViewportHeight, this.canvas.height);
 
         this.gl.bindVertexArray(this.vao);
-        // FR-RENDER-320: Drawing as gl.POINTS
         this.gl.drawArrays(this.gl.POINTS, 0, this.vertexCount);
       }
 
@@ -280,6 +366,6 @@ export class SplatRenderer {
 
   public cleanup() {
     if (this.animationId) cancelAnimationFrame(this.animationId);
-    // Add additional GL cleanup if necessary (delete buffers, etc)
+    // Remove listeners to prevent memory leaks if needed, though they are on canvas/window
   }
 }

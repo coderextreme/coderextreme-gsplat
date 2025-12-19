@@ -1,7 +1,8 @@
 import { ParsedSplatData } from '../types';
 
 // Requirement FR-PLY-150: Limit for debugging/performance
-const MAX_VERTEX_COUNT = 100000; // Increased slightly for better visuals, but safe limit
+// Increased to 1M to support standard Gaussian Splatting benchmark scenes
+const MAX_VERTEX_COUNT = 1000000; 
 
 export const parsePlyFile = async (file: File): Promise<ParsedSplatData> => {
   const buffer = await file.arrayBuffer();

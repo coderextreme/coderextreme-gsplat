@@ -36,6 +36,7 @@ const Viewer: React.FC<ViewerProps> = ({ data }) => {
         id="gl-canvas"
         ref={canvasRef} 
         className="w-full h-full block cursor-move"
+        onContextMenu={(e) => e.preventDefault()}
       />
       {!data && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -43,9 +44,10 @@ const Viewer: React.FC<ViewerProps> = ({ data }) => {
         </div>
       )}
       <div className="absolute bottom-4 left-4 pointer-events-none">
-         <div className="bg-gray-950/80 backdrop-blur-sm p-3 rounded text-xs text-gray-400 border border-gray-800">
-            <p>Left Click + Drag: Rotate</p>
-            <p>Scroll: Zoom</p>
+         <div className="bg-gray-950/80 backdrop-blur-sm p-3 rounded text-xs text-gray-400 border border-gray-800 space-y-1">
+            <p><span className="text-blue-400 font-bold">LMB</span> + Drag: Rotate</p>
+            <p><span className="text-blue-400 font-bold">RMB</span> + Drag: Pan</p>
+            <p><span className="text-blue-400 font-bold">Scroll</span>: Zoom</p>
          </div>
       </div>
     </div>
